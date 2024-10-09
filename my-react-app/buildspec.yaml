@@ -1,0 +1,88 @@
+# version: 0.2
+
+# phases:
+#   install:
+#     runtime-versions:
+#       nodejs: 18
+#     commands:
+#       - echo "Installing dependencies"
+#       - npm install
+       
+#   build:
+#     commands:
+#       - echo "Building the React application"
+#       - npm run build
+     
+# post_build:
+#   commands:
+#     - echo "Post-build actions can be added here"
+
+# artifacts:
+#   files:
+#     - '**/*'  # This will capture all files in the base-directory
+#   base-directory: 'build'
+version: 0.2
+
+env:
+  variables:
+    IMAGE_REPO_NAME: "react_application_repository"
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 339712736872.dkr.ecr.us-east-1.amazonaws.com
+      - export BUILD_NUMBER=$CODEBUILD_BUILD_NUMBER
+      - echo $BUILD_NUMBER      
+      - export UPDATED_BUILD_NUMBER=$((BUILD_NUMBER + 0))
+      - export PREVIOUS_BUILD_NUMBER=$((UPDATED_BUILD_NUMBER - 1))
+
+  build:
+    commands:
+      - echo Building React app...
+      - echo Building Docker image...
+      - docker build -t $IMAGE_REPO_NAME:$UPDATED_BUILD_NUMBER .
+      - docker tag $IMAGE_REPO_NAME:$UPDATED_BUILD_NUMBER 339712736872.dkr.ecr.us-east-1.amazonaws.com/$IMAGE_REPO_NAME:$UPDATED_BUILD_NUMBER
+
+  post_build:
+    commands:
+      - echo Pushing Docker image to Amazon ECR...
+      - docker push 339712736872.dkr.ecr.us-east-1.amazonaws.com/$IMAGE_REPO_NAME:$UPDATED_BUILD_NUMBER
+      - echo Deploying Docker container to EC2 instance using AWS CodeDeploy...
+      - |
+        # Write deploy script to a file
+        cat <<EOT > deploy
+        #!/bin/bash
+
+        # Define variables
+        IMAGE_REPO_NAME="$IMAGE_REPO_NAME"
+        CONTAINER_NAME="react_application_repository"
+
+        # Stop and remove the old container (if it exists)
+        docker stop \$CONTAINER_NAME || true
+        docker rm \$CONTAINER_NAME || true
+        docker rmi 339712736872.dkr.ecr.us-east-1.amazonaws.com/$IMAGE_REPO_NAME:$PREVIOUS_BUILD_NUMBER || true
+
+        # Pull the latest Docker image
+        aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 339712736872.dkr.ecr.us-east-1.amazonaws.com
+        docker pull 339712736872.dkr.ecr.us-east-1.amazonaws.com/$IMAGE_REPO_NAME:$UPDATED_BUILD_NUMBER
+        
+        # Run the new container
+        docker run -itd --name \$CONTAINER_NAME -p 82:80 339712736872.dkr.ecr.us-east-1.amazonaws.com/$IMAGE_REPO_NAME:$UPDATED_BUILD_NUMBER
+        EOT
+      - |
+        # Write appspec.yml for CodeDeploy
+        cat <<EOT > appspec.yml
+        version: 0.0
+        os: linux
+        hooks:
+          BeforeInstall:
+            - location: deploy
+              timeout: 100
+              runas: root
+        EOT
+
+artifacts:
+  files:
+    - deploy
+    - appspec.yml
